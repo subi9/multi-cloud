@@ -41,7 +41,10 @@ func NewAPIService(c client.Client) *APIService {
 func (s *APIService) SyncMetadata(request *restful.Request, response *restful.Response) {
 	log.Info("sync metadata called in api service.")
 	ctx := common.InitCtxWithAuthInfo(request)
-	_, err := s.metaClient.SyncMetadata(ctx, &mt.SyncMetadataRequest{Id: "id"})
+	var id string
+	id = request.PathParameter("backendID")
+	log.Infof("the request recieved for backend is:%s", id)
+	_, err := s.metaClient.SyncMetadata(ctx, &mt.SyncMetadataRequest{Id: id})
 	if err != nil {
 		log.Errorf("failed to sync metadata details: %v\n", err)
 		response.WriteError(http.StatusInternalServerError, err)
@@ -65,41 +68,56 @@ func (s *APIService) ListMetadata(request *restful.Request, response *restful.Re
 
 	//* calling  the ListMetaData method from metadata manager m8s
 	res, err := s.metaClient.ListMetadata(ctx, &listMetadataRequest)
-	log.Info("Get metadata details res.......:.", res)
+	log.Info("Get metadata details res:.", res)
 	if err != nil {
 		log.Errorf("Failed to get metadata details err: \n", err)
-		response.WriteEntity("Failed to get metadata details err")
+		response.WriteEntity(err)
 		return
 	}
 
 	log.Info("got metadata details successfully.")
-	response.WriteEntity(res.Buckets)
+	response.WriteEntity(res.Backends)
 }
 
-//* This function fetches the request parameters from the request and assigns them default values if not present.
+// GetListMetaDataRequest * This function fetches the request parameters from the request and assigns them default values if not present.
 //* It returns ListMetadataRequest for ListMetaData API call
 func GetListMetaDataRequest(request *restful.Request) (listMetadataRequest mt.ListMetadataRequest, err error) {
-	typeOfCloudVendor := request.PathParameter("type")
-	backendName := request.PathParameter("backendName")
-	bucketName := request.PathParameter("bucketName")
-	objectName := request.PathParameter("objectName")
+	typeOfCloudVendor := request.QueryParameter("type")
+	backendName := request.QueryParameter("backendName")
+	bucketName := request.QueryParameter("bucketName")
+	objectName := request.QueryParameter("objectName")
+	region := request.QueryParameter("region")
 	sizeOfObjectInBytes, err := common.GetSizeRequestParamAsInt64(request, "sizeOfObject")
-
 	if err != nil {
 		return mt.ListMetadataRequest{}, err
 	}
+
 	sizeOfBucketInBytes, err := common.GetSizeRequestParamAsInt64(request, "sizeOfBucket")
-
 	if err != nil {
 		return mt.ListMetadataRequest{}, err
 	}
 
-	bucketSizeOperator := request.PathParameter("BucketSizeOperator")
-	objectSizeOperator := request.PathParameter("ObjectSizeOperator")
+	bucketSizeOperator := request.QueryParameter("BucketSizeOperator")
+	objectSizeOperator := request.QueryParameter("ObjectSizeOperator")
+	sortOrder := request.QueryParameter("sort")
 	limit, offset, err := common.GetPaginationParam(request)
+	if err != nil {
+		return mt.ListMetadataRequest{}, err
+	}
 
-	return mt.ListMetadataRequest{Type: typeOfCloudVendor, BackendName: backendName, Limit: limit, Offset: offset,
-		BucketName: bucketName, ObjectName: objectName, SizeOfObjectInBytes: sizeOfObjectInBytes,
-		SizeOfBucketInBytes: sizeOfBucketInBytes, BucketSizeOperator: bucketSizeOperator, ObjectSizeOperator: objectSizeOperator}, err
+	return mt.ListMetadataRequest{
+		Type:                typeOfCloudVendor,
+		BackendName:         backendName,
+		Limit:               limit,
+		Offset:              offset,
+		BucketName:          bucketName,
+		ObjectName:          objectName,
+		SizeOfObjectInBytes: sizeOfObjectInBytes,
+		SizeOfBucketInBytes: sizeOfBucketInBytes,
+		BucketSizeOperator:  bucketSizeOperator,
+		ObjectSizeOperator:  objectSizeOperator,
+		Region:              region,
+		SortOrder:           sortOrder,
+	}, nil
 
 }
