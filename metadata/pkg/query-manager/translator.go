@@ -35,8 +35,8 @@ func Translate(in *pb.ListMetadataRequest) []bson.D {
 	//* https://www.mongodb.com/docs/drivers/go/current/fundamentals/aggregation/
 
 	aggOperations = constructAggOperationForBackendLevel(in, aggOperations)
-	aggOperations = constructAggOperationForBucketLevel(in, aggOperations)
 	aggOperations = constructAggOperationForObjectLevel(in, aggOperations)
+	aggOperations = constructAggOperationForBucketLevel(in, aggOperations)
 	aggOperations = sortAggOperation(aggOperations, constants.BACKEND_NAME, in.SortOrder)
 	return aggOperations
 }
@@ -63,7 +63,7 @@ func constructAggOperationForObjectLevel(in *pb.ListMetadataRequest, aggOperatio
 		matchConditions = append(matchConditions, GetMatchingConditions(constants.OBJECTS_NAME, in.ObjectName, constants.EQUAL_OPERATOR))
 	}
 
-	if in.SizeOfObjectInBytes != 0 && in.ObjectSizeOperator != "" {
+	if in.ObjectSizeOperator != "" {
 		objectSizeFilterCondition := GetConditionForOperator(constants.OBJECT_SIZE, in.SizeOfObjectInBytes, in.ObjectSizeOperator)
 		filterConditions = append(filterConditions, objectSizeFilterCondition)
 		matchConditions = append(matchConditions, GetMatchingConditions(constants.OBJECTS_SIZE, in.SizeOfObjectInBytes, in.ObjectSizeOperator))
@@ -84,6 +84,7 @@ func constructAggOperationForObjectLevel(in *pb.ListMetadataRequest, aggOperatio
 			{constants.BACKEND_NAME, constants.INCLUDE_FIELD},
 			{constants.REGION, constants.INCLUDE_FIELD},
 			{constants.TYPE, constants.INCLUDE_FIELD},
+			{constants.NUMBER_OF_BUCKETS, constants.INCLUDE_FIELD},
 			getBucketsHavingFilteredObjectsQuery(filterConditions),
 		}}}
 		objectLevelAggOperations := []bson.D{
@@ -104,15 +105,17 @@ func getBucketsHavingFilteredObjectsQuery(filterConditions bson.A) bson.E {
 			{constants.IN, bson.D{
 				//* asking to include all the rest of bucket fields in the map output
 				{constants.CREATION_DATE, getQualifiedNameForMapBucket(constants.CREATION_DATE)},
-				{constants.NAME, getQualifiedNameForMapBucket(constants.REGION)},
+				{constants.NAME, getQualifiedNameForMapBucket(constants.NAME)},
 				{constants.REGION, getQualifiedNameForMapBucket(constants.REGION)},
 				{constants.TYPE, getQualifiedNameForMapBucket(constants.TYPE)},
-				{constants.ACCESS, getQualifiedNameForMapBucket(constants.ACCESS)},
+				{constants.BUCKET_ACL, getQualifiedNameForMapBucket(constants.BUCKET_ACL)},
 				{constants.NUMBER_OF_OBJECTS, getQualifiedNameForMapBucket(constants.NUMBER_OF_OBJECTS)},
+				{constants.NUMBER_OF_FILTERED_OBJECTS, getTotalNumberOfObjects(filterConditions)},
 				{constants.TOTAL_SIZE, getQualifiedNameForMapBucket(constants.TOTAL_SIZE)},
-				{constants.TAGS, getQualifiedNameForMapBucket(constants.TAGS)},
+				{constants.FILTERED_BUCKET_SIZE, getTotalSizeForObjects(filterConditions)},
+				{constants.BUCKET_TAGS, getQualifiedNameForMapBucket(constants.BUCKET_TAGS)},
 				//* asking to filter the objects array based on the object level queries given by user
-				getFilteredObjectsQuery(filterConditions),
+				{constants.OBJECTS, getFilteredObjectsQuery(filterConditions)},
 			},
 			},
 		},
@@ -121,15 +124,32 @@ func getBucketsHavingFilteredObjectsQuery(filterConditions bson.A) bson.E {
 	}
 }
 
-func getFilteredObjectsQuery(filterConditions bson.A) bson.E {
-	return bson.E{constants.OBJECTS, bson.D{
+func getTotalSizeForObjects(filterConditions bson.A) bson.D {
+	return bson.D{{"$sum", bson.D{
+		{constants.MAP_AGG_OPERATOR, bson.D{
+			{constants.INPUT, getFilteredObjectsQuery(filterConditions)},
+			{constants.AS, constants.OBJECT},
+			{constants.IN, "$$object.size"}},
+		}}}}
+}
+
+func getTotalNumberOfObjects(filterConditions bson.A) bson.D {
+	return bson.D{{"$size", getFilteredObjectsQuery(filterConditions)}}
+}
+
+func getTotalNumberOfBuckets(filterConditions bson.A) bson.D {
+	return bson.D{{"$size", getFilteredBucketsQuery(filterConditions)}}
+}
+
+func getFilteredObjectsQuery(filterConditions bson.A) bson.D {
+	return bson.D{
+
 		{constants.FILTER_AGG_OP, bson.D{
 			{constants.INPUT, getQualifiedNameForMapBucket(constants.OBJECTS)},
 			{constants.AS, constants.OBJECT},
 			{constants.COND_OPERATOR, bson.D{{constants.AND_OPERATOR, filterConditions}}},
 		},
 		},
-	},
 	}
 }
 
@@ -156,47 +176,66 @@ func constructAggOperationForBucketLevel(in *pb.ListMetadataRequest, aggOperatio
 		matchConditions = append(matchConditions, bucketNameMatchingCondition)
 	}
 
-	if in.SizeOfBucketInBytes != 0 && in.BucketSizeOperator != "" {
+	if isObjectLevelQueryPresent(in) {
+		// if object level query is present then display only the buckets having non-empty objects after filtering
+		// i.e. numberOfFilteredObjects field exists (since it is added only if object level query is present)
+		bucketsHavingFilteredObjectsFilter := bson.D{{"$ifNull", bson.A{"$$bucket.numberOfFilteredObjects", false}}}
+		filterConditions = append(filterConditions, bucketsHavingFilteredObjectsFilter)
+	}
+
+	if in.BucketSizeOperator != "" {
 		bucketSizeMatchingCondition := GetMatchingConditions(constants.TOTAL_SIZE, in.SizeOfBucketInBytes, in.BucketSizeOperator)
 		bucketSizeFilterCondition := GetConditionForOperator(constants.BUCKET_TOTAL_SIZE, in.SizeOfBucketInBytes, in.BucketSizeOperator)
 		filterConditions = append(filterConditions, bucketSizeFilterCondition)
 		matchConditions = append(matchConditions, bucketSizeMatchingCondition)
 	}
 
-	if len(filterConditions) > 0 {
+	var bucketLevelAggOperations []bson.D
+	if len(matchConditions) > 0 {
 		findMatchingDocuments := bson.D{{constants.MATCH_AGG_OP, bson.D{{
 			constants.BUCKETS, bson.D{{
 				constants.ELEMMATCH_AGG_OPERATOR,
 				bson.D(matchConditions),
 			}},
 		}}}}
-
-		log.Debugln("matching query for bucket level ", findMatchingDocuments)
+		bucketLevelAggOperations = append(bucketLevelAggOperations, findMatchingDocuments)
+	}
+	if len(filterConditions) > 0 {
 		filterOnlyRequiredObjects := bson.D{
 			{constants.PROJECT_AGG_OP, bson.D{
 				{constants.ID, constants.INCLUDE_FIELD},
 				{constants.BACKEND_NAME, constants.INCLUDE_FIELD},
 				{constants.REGION, constants.INCLUDE_FIELD},
 				{constants.TYPE, constants.INCLUDE_FIELD},
-				{constants.BUCKETS, bson.D{
-					{constants.FILTER_AGG_OP, bson.D{
-						{constants.INPUT, constants.DOLLAR_SYMBOL + constants.BUCKETS},
-						{constants.AS, constants.BUCKET},
-						{constants.COND_OPERATOR, bson.D{
-							{constants.AND_OPERATOR, filterConditions},
-						}},
-					}},
-				}},
+				{constants.BUCKETS, getFilteredBucketsQuery(filterConditions)},
+				{constants.NUMBER_OF_BUCKETS, constants.INCLUDE_FIELD},
+				{constants.NUMBER_OF_FILTERED_BUCKETS, getTotalNumberOfBuckets(filterConditions)},
 			}},
 		}
-		bucketLevelAggOperations := []bson.D{
-			findMatchingDocuments,
-			filterOnlyRequiredObjects,
-		}
+		bucketLevelAggOperations = append(bucketLevelAggOperations, filterOnlyRequiredObjects)
+	}
+
+	if len(bucketLevelAggOperations) > 0 {
 		aggOperations = append(aggOperations, bucketLevelAggOperations...)
 	}
 
 	return aggOperations
+}
+
+func isObjectLevelQueryPresent(in *pb.ListMetadataRequest) bool {
+	return in.ObjectName != "" || in.ObjectSizeOperator != ""
+}
+
+func getFilteredBucketsQuery(filterConditions bson.A) bson.D {
+	return bson.D{
+		{constants.FILTER_AGG_OP, bson.D{
+			{constants.INPUT, constants.DOLLAR_SYMBOL + constants.BUCKETS},
+			{constants.AS, constants.BUCKET},
+			{constants.COND_OPERATOR, bson.D{
+				{constants.AND_OPERATOR, filterConditions},
+			}},
+		}},
+	}
 }
 
 func GetConditionForOperator(fieldName string, field interface{}, operator string) bson.D {

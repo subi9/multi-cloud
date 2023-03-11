@@ -124,8 +124,6 @@ func (f *metadataService) SyncMetadata(ctx context.Context, in *pb.SyncMetadataR
 func (f *metadataService) ListMetadata(ctx context.Context, in *pb.ListMetadataRequest, out *pb.ListMetadataResponse) error {
 	log.Infof("received GetMetadata request in metadata service:%+v", in)
 
-	log.Info(" validating list metadata resquest started.")
-
 	//* validates the query options such as offset and limit and also the query
 	okie, err := querymanager.ValidateInput(in)
 
@@ -147,7 +145,6 @@ func (f *metadataService) ListMetadata(ctx context.Context, in *pb.ListMetadataR
 	paginatedResult := querymanager.Paginate(unPaginatedResult, in.GetLimit(), in.GetOffset())
 	backends := utils.GetBackends(paginatedResult)
 	out.Backends = backends
-	log.Infoln("resultant backends for user's query:", backends)
 
 	return nil
 }
